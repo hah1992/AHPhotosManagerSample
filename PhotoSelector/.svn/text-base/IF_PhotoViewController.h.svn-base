@@ -1,0 +1,17 @@
+//
+//  PhotoViewController.h
+//  AlbumDemo
+//
+//  Created by 黄安华 on 16/4/23.
+//  Copyright © 2016年 黄安华. All rights reserved.
+//
+
+#import <UIKit/UIKit.h>
+
+@interface IF_PhotoViewController : UIViewController
+@property (strong, nonatomic) NSArray *defaultTags;
+@property (strong, nonatomic) NSNumber *aid;
+@property (assign, nonatomic) BOOL allowLibraryAutho;
+
+- (instancetype)initWithPublishSucceedHandler:(void (^ _Nullable)(UIImage *_Nonnull image, NSString *content, NSString *pid))succeedHandler;
+@end

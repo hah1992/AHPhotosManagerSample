@@ -1,0 +1,94 @@
+//
+//  IFPhotosManager.h
+//  IFAPP
+//
+//  Created by hah on 16/5/13.
+//  Copyright © 2016年 IFfashion. All rights reserved.
+//
+
+#import <UIKit/UIKit.h>
+@import Photos;
+@class AlbumModel;
+
+typedef enum {
+    IFPhotoQualityLow = 0,
+    IFPhotoQualityNormal = 1,
+    IFPhotoQualityHight = 2
+}IFPhotoQuality;
+
+@interface IFPhotosManager : NSObject
+
++ (instancetype)sharePhotoManager;
+
+/**
+ *  默认的相机，只支持拍照，不支持视频，默认后置摄像头
+ */
+- (void)presentDefaultCamerafromViewController:(UIViewController *)fromVC
+                    withNoAuthorizationHandler:(void (^)(UIAlertAction *action))noAuthoHandler
+                          notCameraTypeHandler:(void (^)(UIAlertAction *action))notCameraTypeHandler
+                             presentCompletion:(void (^)())completion
+                                   pickFinshed:(void (^)(UIImage *img, NSDictionary *info))finishAction
+                                       dismiss:(void (^)())dismiss;
+
+/**
+ *  自定义相机，内部帮助判断设备是否支持相机以及类型判断
+ */
+- (void)presentImagepickerController:(UIImagePickerController *)imgPicker
+                  fromViewController:(UIViewController *)fromVC
+          WithNoAuthorizationHandler:(void (^)(UIAlertAction *action))noAuthoHandler
+          unSupportSourctTypeHandler:(void (^)(UIAlertAction *action))unSupportHandler
+                   presentCompletion:(void (^)())completion
+                         pickFinshed:(void (^ _Nullable)(UIImage *img, NSDictionary * _Nonnull info))finishAction
+                             dismiss:(void (^ _Nullable)())dismiss;
+
+//获取所有相册
+- (void)fetchAllAlbumsWithCompletionHanler:(void (^ _Nullable)(NSArray<AlbumModel *> *_Nonnull albums, AlbumModel *_Nonnull cameraRoll))completion
+                                 failAcion:(void (^ _Nullable)(NSError *_Nonnull error))failAction;
+
+//获取相机胶卷，所有图片
+
+//获取当前下标图片
+- (void)requestLowQualityImageInAlbum:(id _Nullable)album
+                              atIndex:(NSUInteger)currentIndex
+                        withImageSize:(CGSize)targetSize
+                          contentMode:(PHImageContentMode)contentMode
+                           completion:(void (^ _Nullable)(UIImage *_Nonnull result)) completion;
+
+- (void)requestNormalQualityImageInAlbum:(id _Nullable)album
+                                 atIndex:(NSUInteger)currentIndex
+                           withImageSize:(CGSize)targetSize
+                             contentMode:(PHImageContentMode)contentMode
+                              completion:(void (^ _Nullable)(UIImage *_Nullable result)) completion;
+
+- (void)requestHighQualityImageInAlbum:(id _Nullable)album
+                               atIndex:(NSUInteger)currentIndex
+                         withImageSize:(CGSize)targetSize
+                           contentMode:(PHImageContentMode)contentMode
+                            completion:(void (^ _Nullable)(UIImage *_Nullable result)) completion;
+
+- (void)requestImageWithImageQuality:(IFPhotoQuality)quality
+                             InAlbum:(id _Nullable)album
+                             atIndex:(NSUInteger)currentIndex
+                       withImageSize:(CGSize)targetSize
+                         contentMode:(PHImageContentMode)contentMode
+                          completion:(void (^ _Nullable)(UIImage *_Nullable result)) completion;
+
+- (void)requestImageInAlbum:(id _Nullable)album
+                    atIndex:(NSUInteger)currentIndex
+              withImageSize:(CGSize)targetSize
+        imageRequestOptions:(PHImageRequestOptions *_Nullable)imgRequestOptions
+                contentMode:(PHImageContentMode)contentMode
+                 completion:(void (^ _Nullable)(UIImage *_Nullable result)) completion;
+
+
+
+
+//- (void)requestDetailImageInAlbum:(id)album atIndex:(NSUInteger)currentIndex withImageSize:(CGSize)targetSize contentMode:(PHImageContentMode)contentMode completion: (void (^)(UIImage *result)) completion;
+
+
+//
+
+//获取给定相册中的所有图片
+
+
+@end

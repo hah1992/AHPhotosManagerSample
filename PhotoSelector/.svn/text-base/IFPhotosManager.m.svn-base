@@ -1,0 +1,741 @@
+//
+//  IFPhotosManager.m
+//  IFAPP
+//
+//  Created by hah on 16/5/13.
+//  Copyright © 2016年 IFfashion. All rights reserved.
+//
+
+
+#import "IFPhotosManager.h"
+#import "Masonry.h"
+#import "AlbumModel.h"
+#import "PhotoModel.h"
+#import "PhotoCell.h"
+#import "PhotoDetailView.h"
+#import "AlbumLisetView.h"
+#import "PublishViewController.h"
+#import "LC_UIHud.h"
+
+typedef void (^imgPickerFineshedHandler)(UIImage *result,  NSDictionary * _Nonnull info);
+typedef void (^presentCompletion)();
+
+@interface IFPhotosManager ()<NSCopying, PHPhotoLibraryChangeObserver,UIAlertViewDelegate, UIImagePickerControllerDelegate,UINavigationControllerDelegate>
+@property (strong, nonatomic) LC_UIHud *hud;
+
+@property (nonatomic, strong) PHImageManager *imageManager;
+@property (strong, nonatomic) PHCachingImageManager *cachingManager;
+@property (strong, nonatomic) ALAssetsLibrary *library;
+@property (strong, nonatomic) NSMutableArray  *albums;
+@property (strong, nonatomic) AlbumModel *album;
+@property (strong, nonatomic) PHFetchResult *selectedResult;
+
+@property (strong, nonatomic) UIImage *selectedImg;
+@property (assign, nonatomic) NSInteger selectedIndex;
+@property (assign, nonatomic) BOOL isFromCam;
+@property (assign, nonatomic) CGRect previousPreheatRect;
+
+@property (nonatomic, copy) imgPickerFineshedHandler finishPickHandler;
+@property (copy, nonatomic) presentCompletion present;
+@property (copy, nonatomic) presentCompletion dismiss;
+
+@property (assign, nonatomic) id observer;
+
+@end
+
+
+static CGSize AssetGridThumbnailSize;
+static NSInteger const iOS7AlertTag_Cam = 10001;
+static NSInteger const iOS7AlertTag_Lib = 10002;
+static NSString * const NoAlbumAuthorization = @"未能获取相册权限，请前往设置-隐私-照片设置权限";
+static NSString * const NoCameraAuthorization = @"未能获取相机权限，请前往设置-隐私-相机设置权限";
+
+static IFPhotosManager *manager;
+
+@implementation IFPhotosManager
+
+#pragma mark - share instance
+
++ (instancetype)sharePhotoManager {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        manager = [[self alloc] init];
+        [[PHPhotoLibrary sharedPhotoLibrary] registerChangeObserver:manager];
+    });
+    return manager;
+}
+
++ (instancetype)allocWithZone:(struct _NSZone *)zone {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        manager = [super allocWithZone:zone];
+        [[PHPhotoLibrary sharedPhotoLibrary] registerChangeObserver:manager];
+    });
+    return manager;
+}
+
+- (id)copyWithZone:(NSZone *)zone{
+    return manager;
+}
+
+- (instancetype)init{
+    self = [super init];
+    
+    if (!self) return nil;
+    
+    self.cachingManager = [[PHCachingImageManager alloc] init];
+    
+    return self;
+}
+
+
+#pragma mark - lazy load
+
+- (NSMutableArray *)albums{
+    if (!_albums) {
+        _albums = [NSMutableArray array];
+    }
+    return _albums;
+}
+
+- (void)unregisterChangeObserver{
+    [[PHPhotoLibrary sharedPhotoLibrary] unregisterChangeObserver:self];
+}
+
+
+#pragma mark - fetch & rquest iamge
+
+- (void)fetchAllAlbumsWithCompletionHanler:(void (^ _Nullable)(NSArray<AlbumModel *> *_Nonnull albums, AlbumModel *_Nonnull cameraRoll))completion failAcion:(void (^ _Nullable)(NSError *_Nonnull error))failAction{
+    
+    [self.albums removeAllObjects];
+    
+    if (IOS8_OR_LATER) {
+        [self fetchAllAlbumsFromPhotosWithCompletionHanler:completion];
+    }else {
+        [self fetchAllAlbumsWithCompletionHanler:completion failAcion:failAction];
+    }
+}
+
+- (void)requestAllPhotosInAlbum:(id)album completion:(void (^)(NSArray <UIImage *> *))completion {
+    if (IOS8_OR_LATER) {
+        [self showAllPhotosInResult:album completion:completion];
+    }else {
+        [self showAllPhotosInGroup:album completion:completion];
+    }
+}
+
+- (void)requestLowQualityImageInAlbum:(id)album
+                              atIndex:(NSUInteger)currentIndex
+                        withImageSize:(CGSize)targetSize
+                          contentMode:(PHImageContentMode)contentMode
+                           completion:(void (^)(UIImage *result)) completion {
+    
+    [self requestImageWithImageQuality:IFPhotoQualityLow InAlbum:album atIndex:currentIndex withImageSize:targetSize contentMode:contentMode completion:completion];
+}
+
+- (void)requestNormalQualityImageInAlbum:(id)album
+                                 atIndex:(NSUInteger)currentIndex
+                           withImageSize:(CGSize)targetSize
+                             contentMode:(PHImageContentMode)contentMode
+                              completion:(void (^)(UIImage *result)) completion {
+    
+    [self requestImageWithImageQuality:IFPhotoQualityNormal InAlbum:album atIndex:currentIndex withImageSize:targetSize contentMode:contentMode completion:completion];
+}
+
+- (void)requestHighQualityImageInAlbum:(id)album
+                               atIndex:(NSUInteger)currentIndex
+                         withImageSize:(CGSize)targetSize
+                           contentMode:(PHImageContentMode)contentMode
+                            completion:(void (^)(UIImage *result)) completion {
+    
+    [self requestImageWithImageQuality:IFPhotoQualityHight InAlbum:album atIndex:currentIndex withImageSize:targetSize contentMode:contentMode completion:completion];
+}
+
+- (void)requestImageWithImageQuality:(IFPhotoQuality)quality
+                             InAlbum:(id)album
+                             atIndex:(NSUInteger)currentIndex
+                       withImageSize:(CGSize)targetSize
+                         contentMode:(PHImageContentMode)contentMode
+                          completion:(void (^)(UIImage *result)) completion{
+    
+    PHImageRequestOptions *imgReqOptions = [[PHImageRequestOptions alloc] init];
+    imgReqOptions.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
+    imgReqOptions.resizeMode = PHImageRequestOptionsResizeModeExact;
+    
+    PHImageRequestOptionsDeliveryMode deliveryMode;
+    PHImageRequestOptionsResizeMode resizeMode;
+    BOOL synchronous;
+    
+    switch (quality) {
+        case IFPhotoQualityLow:
+            deliveryMode = PHImageRequestOptionsDeliveryModeFastFormat;
+            synchronous = YES;
+            resizeMode = PHImageRequestOptionsResizeModeFast;
+            
+            break;
+            
+        case IFPhotoQualityNormal:
+            deliveryMode = PHImageRequestOptionsDeliveryModeOpportunistic;
+            resizeMode = PHImageRequestOptionsResizeModeFast;
+            
+            break;
+            
+        case IFPhotoQualityHight:
+            deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
+            synchronous = YES;
+            resizeMode = PHImageRequestOptionsResizeModeExact;
+            
+            break;
+            
+        default:
+            break;
+    }
+    
+    imgReqOptions.deliveryMode = deliveryMode;;
+    imgReqOptions.resizeMode   = resizeMode;
+    imgReqOptions.synchronous  = synchronous;
+    
+    [self requestImageInAlbum:album atIndex:currentIndex withImageSize:targetSize imageRequestOptions:imgReqOptions contentMode:contentMode completion:completion];
+    
+}
+
+- (void)requestImageInAlbum:(id)album
+                    atIndex:(NSUInteger)currentIndex
+              withImageSize:(CGSize)targetSize
+        imageRequestOptions:(PHImageRequestOptions *)imgRequestOptions
+                contentMode:(PHImageContentMode)contentMode
+                 completion:(void (^)(UIImage *result)) completion {
+    
+    if ([album isKindOfClass:[PHFetchResult class]]) {
+        
+        [self requestImageAtIndex:currentIndex
+                       forRequest:album
+                       targetSize:targetSize
+                      contentMode:contentMode
+                          options:imgRequestOptions
+                   requestHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
+                       
+                       if (completion) {
+                           completion(result);
+                       }
+                   }];
+        
+    }else if([album isKindOfClass:[ALAssetsGroup class]]){
+        
+        @autoreleasepool {
+            [album enumerateAssetsWithOptions:NSEnumerationReverse usingBlock:^(ALAsset *result, NSUInteger index, BOOL *stop) {
+                //倒序检索，需要与当前选择cell的index对应
+                NSInteger idx = [album numberOfAssets] - 1 - index;
+                
+                if (idx == currentIndex) {
+                    
+                    CGImageRef detail = result.defaultRepresentation.fullScreenImage;
+                    UIImage *image = [UIImage imageWithCGImage:detail scale:0.1 orientation:UIImageOrientationUp];
+                    
+                    if (completion) {
+                        completion(image);
+                    }
+                    
+                    //检索到当前选中的图片详情后跳出检索
+                    *stop = YES;
+                }
+            }];
+        }
+    }
+}
+
+- (void)presentDefaultCamerafromViewController:(UIViewController *)fromVC
+                    withNoAuthorizationHandler:(void (^)(UIAlertAction *action))noAuthoHandler
+                          notCameraTypeHandler:(void (^)(UIAlertAction *action))notCameraTypeHandler
+                             presentCompletion:(void (^)())completion
+                                   pickFinshed:(void (^)(UIImage *img, NSDictionary * _Nonnull info))finishAction
+                                       dismiss:(void (^)())dismiss {
+    
+    UIImagePickerController *pickerController = [[UIImagePickerController alloc] init];
+    pickerController.sourceType = UIImagePickerControllerSourceTypeCamera;
+    pickerController.cameraCaptureMode = UIImagePickerControllerCameraCaptureModePhoto;
+    pickerController.cameraDevice = UIImagePickerControllerCameraDeviceRear;
+    pickerController.cameraFlashMode = UIImagePickerControllerCameraFlashModeAuto;
+    pickerController.showsCameraControls = YES;
+    
+    [self presentImagepickerController:pickerController fromViewController:fromVC WithNoAuthorizationHandler:noAuthoHandler unSupportSourctTypeHandler:notCameraTypeHandler presentCompletion:completion pickFinshed:finishAction dismiss:dismiss];
+}
+
+
+#pragma mark - show groups pictures
+
+- (void)getCameraRollWithCompetion: ( void (^ _Nonnull )(AlbumModel *album))completion failureHandler:(void (^ _Nullable)(NSError *_Nullable error))failureHandler {
+    
+    __block AlbumModel *album;
+    
+    if (IOS8_OR_LATER) {
+        PHFetchOptions *option = [[PHFetchOptions alloc] init];
+        option.predicate = [NSPredicate predicateWithFormat:@"mediaType == %ld", PHAssetMediaTypeImage];
+        option.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"creationDate" ascending:YES]];
+        
+        PHFetchResult *smartAlbum = [PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeSmartAlbum subtype:PHAssetCollectionSubtypeSmartAlbumUserLibrary options:option];
+        [smartAlbum enumerateObjectsUsingBlock:^(id  _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+            
+            PHAssetCollection *assetCollection = (PHAssetCollection *)obj;
+            BOOL isCamRoll = [assetCollection.localizedTitle isEqualToString:@"相机胶卷"] || [assetCollection.localizedTitle isEqualToString:@"Camera Roll"];
+            if (isCamRoll) {
+                PHFetchResult *result = [PHAsset fetchAssetsInAssetCollection:assetCollection options:nil];
+                album = [self produceAlbumModelWithResult:result name:assetCollection.localizedTitle posterImgSize:CGSizeMake(100, 100) photoSize:CGSizeMake(500, 500)];
+                *stop = YES;
+            }
+        }];
+    }else {
+        
+        [self fetchGroupWithNoramlHandler:^(ALAssetsGroup *group, BOOL *stop) {
+            
+            NSString *name = [group valueForProperty:ALAssetsGroupPropertyName];
+            if ([name isEqualToString:@"相机胶卷"] || [name isEqualToString:@"Camera Roll"]) {
+                
+                [group setAssetsFilter:[ALAssetsFilter allPhotos]];
+                
+                album.group = group;
+                album.albumName = name;
+                album.postImage = [UIImage imageWithCGImage:group.posterImage];
+                album.photoCount = group.numberOfAssets;
+                
+                *stop = YES;
+            }
+            
+            NSLog(@"未找到相机胶卷");
+            
+        } CompletionHandler:nil failureHandler:failureHandler];
+        
+    }
+    
+    completion(album);
+}
+
+- (void)requestImageAtIndex:(NSUInteger)idx
+                 forRequest:(PHFetchResult *)result
+                 targetSize:(CGSize)targetSize
+                contentMode:(PHImageContentMode)contentMode
+                    options:(PHImageRequestOptions *)options
+             requestHandler:(void (^)(UIImage * _Nullable result, NSDictionary * _Nullable info)) handler {
+    
+    if (result.count <= 0) {
+        return;
+    }
+    
+    PHAsset *asset = result[idx];
+    [self.cachingManager requestImageForAsset:asset
+                                   targetSize:targetSize
+                                  contentMode:contentMode
+                                      options:options
+                                resultHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
+                                    
+                                    if (!result) { return; }
+                                    
+                                    if (handler) { handler(result,info); }
+                                }];
+}
+
+- (AlbumModel *)produceAlbumModelWithResult:(id)result
+                                       name:(NSString *)name
+                              posterImgSize:(CGSize)posterSize
+                                  photoSize:(CGSize)photoSize {
+    
+    __block AlbumModel *album;
+    album.albumName = name;
+    
+    if ([result isKindOfClass:[PHFetchResult class]]) {
+        
+        PHFetchResult *fetchResult = result;
+        
+        [self requestImageAtIndex:0 forRequest:fetchResult targetSize:posterSize contentMode:PHImageContentModeAspectFill options:nil requestHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
+            album.postImage = result;
+        }];
+        
+        album.photoCount  = fetchResult.count;
+        album.fetchResult = fetchResult;
+        
+        album.photos = [self requestAllPhotosInFetchResult:fetchResult withPhotoSize:photoSize contentMode:PHImageContentModeAspectFill options:nil].copy;
+        
+    }else {
+        
+    }
+    return album;
+}
+
+- (NSArray *)requestAllPhotosInFetchResult:(PHFetchResult *)result withPhotoSize:(CGSize)photoSize contentMode:(PHImageContentMode)contenMode options:(PHImageRequestOptions *)options {
+    
+    __block NSMutableArray *photos = [NSMutableArray arrayWithCapacity:result.count];
+    
+    dispatch_queue_t queue = dispatch_queue_create("com.IFPhotoManager.queue", DISPATCH_QUEUE_CONCURRENT);
+    dispatch_barrier_async(queue, ^{
+        [result enumerateObjectsUsingBlock:^(id  _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+            PHAsset *asset = (PHAsset *)obj;
+            [self.imageManager requestImageForAsset:asset targetSize:photoSize contentMode:PHImageContentModeAspectFill options:nil resultHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
+                [photos addObject:result];
+            }];
+        }];
+    });
+    
+    return photos;
+}
+
+//TODO:优化列表头图
+- (void)fetchAllAlbumsFromPhotosWithCompletionHanler:(void(^)(NSArray<AlbumModel *> *albums, AlbumModel *cameraRoll)) completion {
+    
+    PHFetchOptions *camOption = [PHFetchOptions new];
+    camOption.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"creationDate" ascending:NO]];
+    PHFetchResult *camRoll = [PHAsset fetchAssetsWithOptions:camOption];
+    AlbumModel *cameraRoll = [[AlbumModel alloc] init];
+    cameraRoll.albumName = @"相机胶卷";
+    cameraRoll.photoCount = camRoll.count;
+    cameraRoll.fetchResult = camRoll;
+    
+    [self requestHighQualityImageInAlbum:camRoll atIndex:0 withImageSize:AssetGridThumbnailSize contentMode:PHImageContentModeAspectFill completion:^(UIImage *result) {
+        cameraRoll.postImage = result;
+    }];
+    
+    [self.albums addObject:cameraRoll];
+    self.selectedResult = camRoll;
+    
+    PHFetchOptions *userAlbumsOptions = [PHFetchOptions new];
+    userAlbumsOptions.predicate = [NSPredicate predicateWithFormat:@"estimatedAssetCount > 0"];
+    PHFetchResult *userAlbums = [PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeAlbum subtype:PHAssetCollectionSubtypeAny options:userAlbumsOptions];
+    
+    [userAlbums enumerateObjectsUsingBlock:^(id  _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+        
+        if (![obj isKindOfClass:[PHAssetCollection class]]) { return; }
+        
+        PHAssetCollection *assetCollection = (PHAssetCollection *)obj;
+        AlbumModel *album = [[AlbumModel alloc] init];
+        album.albumName = assetCollection.localizedTitle;
+        
+        PHFetchResult *cusmtomAlbum = [PHAsset fetchKeyAssetsInAssetCollection:(PHAssetCollection *)obj options:nil];
+        album.fetchResult = cusmtomAlbum;
+        album.photoCount = cusmtomAlbum.count;
+        
+        [self requestHighQualityImageInAlbum:cusmtomAlbum atIndex:0 withImageSize:AssetGridThumbnailSize contentMode:PHImageContentModeAspectFill completion:^(UIImage *result) {
+             album.postImage = result;
+        }];
+        
+        [self.albums addObject:album];
+    }];
+    
+    if (completion) {
+        completion(self.albums,cameraRoll);
+    }
+}
+
+- (void)fetchAllAlbumsFromALAssetLibraryWithCompletionHanler:(void(^)(NSArray<AlbumModel *> *albums, AlbumModel *cameraRoll)) handler failureBlock:(void(^)(NSError *error))failAction {
+    
+    __weak typeof(self) weakSelf = self;
+
+    [self fetchGroupWithNoramlHandler:^(ALAssetsGroup *group, BOOL *stop) {
+        
+        NSString *name = [group valueForProperty:ALAssetsGroupPropertyName];
+        if (group.numberOfAssets > 0) {
+            [group setAssetsFilter:[ALAssetsFilter allPhotos]];
+            AlbumModel *album = [[AlbumModel alloc] init];
+            album.group = group;
+            album.albumName = name;
+            album.postImage = [UIImage imageWithCGImage:group.posterImage];
+            album.photoCount = group.numberOfAssets;
+            [weakSelf.albums addObject:album];
+        }
+        
+    } CompletionHandler:^() {
+        
+            [weakSelf.hud hide];
+            AlbumModel *cameraRoll = weakSelf.albums.lastObject;
+        
+            if (handler) { handler(weakSelf.albums,cameraRoll); }
+        
+    } failureHandler:failAction];
+}
+
+- (void)fetchGroupWithNoramlHandler:(ALAssetsLibraryGroupsEnumerationResultsBlock)normal
+                  CompletionHandler:(void (^)())completion
+                     failureHandler:(void(^)(NSError *error))failAction {
+
+    ALAssetsLibraryGroupsEnumerationResultsBlock success = ^(ALAssetsGroup *group, BOOL *stop){
+        
+        if (!group) {
+            if (completion) {
+                completion();
+            }
+        }
+        
+        if (normal) {
+            normal(group,stop);
+        }
+    };
+    
+    __weak typeof(self) weakSelf = self;
+    
+    ALAssetsLibraryAccessFailureBlock fail = ^(NSError *error) {
+        [weakSelf showWarningWithAlertTag:iOS7AlertTag_Lib message:NoAlbumAuthorization action:^(UIAlertAction *action) {
+            
+            if (failAction) { failAction(error); }
+        }];
+    };
+    
+    [self.library enumerateGroupsWithTypes:ALAssetsGroupSavedPhotos|ALAssetsGroupAlbum|ALAssetsGroupEvent  usingBlock:success failureBlock:fail];
+}
+
+- (void)showAllPhotosInGroup:(ALAssetsGroup *)group completion:(void (^)(NSArray <UIImage *> *results))completion{
+    
+    self.hud = [self showLoadingHud:@"正在加载"];
+    __block NSMutableArray *array = [NSMutableArray array];
+    [group enumerateAssetsWithOptions:NSEnumerationReverse usingBlock:^(ALAsset *result, NSUInteger index, BOOL *stop) {
+        
+        NSString *photoType = [result valueForProperty:ALAssetPropertyType];
+        
+        if (![photoType isEqualToString:ALAssetTypePhoto]) return;
+        
+        PhotoModel *photo = [PhotoModel new];
+        photo.thumb = [UIImage imageWithCGImage:result.thumbnail];
+        //只取出相册中的第一张照片显示
+        if (index == group.numberOfAssets-1) {
+            CGImageRef detail = result.defaultRepresentation.fullScreenImage;
+            photo.image = [UIImage imageWithCGImage:detail scale:0.1 orientation:UIImageOrientationUp];
+        }
+        
+        photo.asset = result;
+        [array addObject:photo];
+    }];
+    self.album.photos = array;
+    if (completion) {
+        completion(array);
+    }
+    [self.hud hide];
+}
+
+- (void)showAllPhotosInResult:(PHFetchResult *)fetchResult completion:(void (^)(NSArray <UIImage *> *))results{
+    self.hud = [self showLoadingHud:@"正在加载"];
+    self.selectedResult = fetchResult;
+    [self.hud hide];
+}
+
+
+#pragma mark - image picker
+
+- (void)checkAuthoStateWithSourceType:(UIImagePickerControllerSourceType)type
+               noAuthorizationHandler:(void (^)(UIAlertAction *action))noAuthoHandler
+           unSupportSourctTypeHandler:(void (^)(UIAlertAction *action))unSupportHandler{
+    
+    AVAuthorizationStatus authoState = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+    if (authoState == AVAuthorizationStatusDenied || authoState == AVAuthorizationStatusRestricted) {
+        [self showWarningWithAlertTag:iOS7AlertTag_Cam message:NoCameraAuthorization action:noAuthoHandler];
+        return;
+    }
+    
+    BOOL cameraType = [UIImagePickerController isSourceTypeAvailable:type];
+    if (!cameraType) {
+        [self showWarningWithAlertTag:iOS7AlertTag_Lib message:@"该设备不支持拍照功能" action:unSupportHandler];
+        return;
+    }
+}
+
+- (void)showWarningWithAlertTag:(NSInteger)tag message:(NSString *)warning action:(void (^)(UIAlertAction *action))anAction {
+    if ([[UIDevice currentDevice].systemVersion doubleValue] < 8.0) {
+        UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"提示" message:warning delegate:self cancelButtonTitle:@"好的" otherButtonTitles:nil];
+        alert.tag = tag;
+        alert.delegate = self;
+        [alert show];
+    }else {
+        UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"提示" message:warning preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertAction *OK = [UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleCancel handler:^(UIAlertAction * _Nonnull action) {
+            if (anAction) {
+                anAction(action);
+            }
+        }];
+        [alertController addAction:OK];
+    }
+}
+
+- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex{
+    if (alertView.tag == iOS7AlertTag_Lib) {
+        
+    }
+}
+
+- (void)presentImagepickerController:(UIImagePickerController *)imgPicker
+                  fromViewController:(UIViewController *)fromVC
+          WithNoAuthorizationHandler:(void (^)(UIAlertAction *action))noAuthoHandler
+          unSupportSourctTypeHandler:(void (^)(UIAlertAction *action))unSupportHandler
+                   presentCompletion:(void(^)())completion
+                         pickFinshed:(void(^)(UIImage *img, NSDictionary * _Nonnull info))finishAction
+                             dismiss:(void(^)())dismiss{
+    
+    //check authrization state and show warning
+    [self checkAuthoStateWithSourceType:imgPicker.sourceType
+                 noAuthorizationHandler:noAuthoHandler
+             unSupportSourctTypeHandler:unSupportHandler];
+    
+    self.finishPickHandler = finishAction ?: nil;
+    self.present = completion ?: nil;
+    self.dismiss = dismiss ?: nil;
+    
+    imgPicker.delegate = self;
+    [fromVC presentViewController:imgPicker animated:YES completion:completion];
+}
+
+- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<NSString *,id> *)info {
+    
+    void (^completion)() = ^{
+        UIImage *image;
+        if ([info[UIImagePickerControllerMediaType] isEqualToString:@"public.image"]) {
+            
+            image = info[UIImagePickerControllerOriginalImage];
+            //确认选择后将照片存入相册
+            dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                ALAssetsLibrary *library = [ALAssetsLibrary new];
+                [library writeImageDataToSavedPhotosAlbum:UIImageJPEGRepresentation(image, 1) metadata:nil completionBlock:nil];
+            });
+            
+            //解决拍照后图片会向左转９０度的问题
+            UIImageOrientation imageOrientation=image.imageOrientation;
+            if(imageOrientation!=UIImageOrientationUp){
+                UIGraphicsBeginImageContext(image.size);
+                [image drawInRect:CGRectMake(0, 0, image.size.width, image.size.height)];
+                image = UIGraphicsGetImageFromCurrentImageContext();
+                UIGraphicsEndImageContext();
+            }
+        }
+        
+        if (self.finishPickHandler) {
+            self.finishPickHandler(image, info);
+        }
+    };
+    
+    [picker dismissViewControllerAnimated:YES completion:completion];
+}
+
+#pragma mark - Asset change
+
+- (void)photoLibraryDidChange:(PHChange *)changeInstance {
+    // Check if there are changes to the assets we are showing.
+    PHFetchResultChangeDetails *collectionChanges = [changeInstance changeDetailsForFetchResult:self.selectedResult];
+    if (collectionChanges == nil) {
+        return;
+    }
+    self.selectedResult = [collectionChanges fetchResultAfterChanges];
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        //刷新相机胶卷相册
+        AlbumModel *album = self.albums[0];
+        album.albumName = @"相机胶卷";
+        album.photoCount = self.selectedResult.count;
+        album.fetchResult = self.selectedResult;
+        
+        PHImageRequestOptions *imgReqOptions = [[PHImageRequestOptions alloc] init];
+        imgReqOptions.deliveryMode = PHImageRequestOptionsDeliveryModeFastFormat;
+        [self requestImageAtIndex:0 forRequest:self.selectedResult targetSize:AssetGridThumbnailSize contentMode:PHImageContentModeAspectFill options:imgReqOptions requestHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
+            album.postImage = result;
+        }];
+    });
+}
+
+- (void)changeAction{
+    
+}
+
+
+#pragma mark - dealloc
+
+- (void)dealloc {
+    [[PHPhotoLibrary sharedPhotoLibrary] unregisterChangeObserver:self];
+}
+
+
+#pragma mark - preheat loading image
+
+- (void)updateCachedAssetsInPreheatRect:(CGRect)preheatRect {
+    
+    preheatRect = CGRectInset(preheatRect, 0.0f, -0.5f * CGRectGetHeight(preheatRect));
+    
+    /*
+     Check if the collection view is showing an area that is significantly
+     different to the last preheated area.
+     */
+    CGFloat delta = ABS(CGRectGetMidY(preheatRect) - CGRectGetMidY(self.previousPreheatRect));
+    //    if (delta > CGRectGetHeight(self.collectionView.bounds) / 3.0f) {
+    //
+    //        // Compute the assets to start caching and to stop caching.
+    //        NSMutableArray *addedIndexPaths = [NSMutableArray array];
+    //        NSMutableArray *removedIndexPaths = [NSMutableArray array];
+    //
+    //        [self computeDifferenceBetweenRect:self.previousPreheatRect andRect:preheatRect removedHandler:^(CGRect removedRect) {
+    //            NSArray *indexPaths = [self.collectionView aapl_indexPathsForElementsInRect:removedRect];
+    //            [removedIndexPaths addObjectsFromArray:indexPaths];
+    //        } addedHandler:^(CGRect addedRect) {
+    //            NSArray *indexPaths = [self.collectionView aapl_indexPathsForElementsInRect:addedRect];
+    //            [addedIndexPaths addObjectsFromArray:indexPaths];
+    //        }];
+    
+    //        NSArray *assetsToStartCaching = [self assetsAtIndexPaths:addedIndexPaths];
+    //        NSArray *assetsToStopCaching = [self assetsAtIndexPaths:removedIndexPaths];
+    //
+    //        // Update the assets the PHCachingImageManager is caching.
+    //        [self.cachingManager startCachingImagesForAssets:assetsToStartCaching
+    //                                            targetSize:AssetGridThumbnailSize
+    //                                           contentMode:PHImageContentModeAspectFill
+    //                                               options:nil];
+    //        [self.cachingManager stopCachingImagesForAssets:assetsToStopCaching
+    //                                           targetSize:AssetGridThumbnailSize
+    //                                          contentMode:PHImageContentModeAspectFill
+    //                                              options:nil];
+    //
+    //        // Store the preheat rect to compare against in the future.
+    //        self.previousPreheatRect = preheatRect;
+    //    }
+}
+
+- (void)computeDifferenceBetweenRect:(CGRect)oldRect andRect:(CGRect)newRect removedHandler:(void (^)(CGRect removedRect))removedHandler addedHandler:(void (^)(CGRect addedRect))addedHandler {
+    if (CGRectIntersectsRect(newRect, oldRect)) {
+        CGFloat oldMaxY = CGRectGetMaxY(oldRect);
+        CGFloat oldMinY = CGRectGetMinY(oldRect);
+        CGFloat newMaxY = CGRectGetMaxY(newRect);
+        CGFloat newMinY = CGRectGetMinY(newRect);
+        
+        if (newMaxY > oldMaxY) {
+            CGRect rectToAdd = CGRectMake(newRect.origin.x, oldMaxY, newRect.size.width, (newMaxY - oldMaxY));
+            addedHandler(rectToAdd);
+        }
+        
+        if (oldMinY > newMinY) {
+            CGRect rectToAdd = CGRectMake(newRect.origin.x, newMinY, newRect.size.width, (oldMinY - newMinY));
+            addedHandler(rectToAdd);
+        }
+        
+        if (newMaxY < oldMaxY) {
+            CGRect rectToRemove = CGRectMake(newRect.origin.x, newMaxY, newRect.size.width, (oldMaxY - newMaxY));
+            removedHandler(rectToRemove);
+        }
+        
+        if (oldMinY < newMinY) {
+            CGRect rectToRemove = CGRectMake(newRect.origin.x, oldMinY, newRect.size.width, (newMinY - oldMinY));
+            removedHandler(rectToRemove);
+        }
+    } else {
+        addedHandler(newRect);
+        removedHandler(oldRect);
+    }
+}
+
+- (NSArray *)assetsAtIndexPaths:(NSArray *)indexPaths {
+    if (indexPaths.count == 0) { return nil; }
+    
+    NSMutableArray *assets = [NSMutableArray arrayWithCapacity:indexPaths.count];
+    for (NSIndexPath *indexPath in indexPaths) {
+        //        PHAsset *asset = self.assetsFetchResults[indexPath.item];
+        //        [assets addObject:asset];
+    }
+    
+    return assets;
+}
+
+@end
+
+
+
+
+
+
